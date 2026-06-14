@@ -18,7 +18,7 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price, get_trending_styles
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -41,6 +41,8 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
+        "price_analysis": None,      # dict from compare_price (optional)
+        "trending_styles": None,     # list from get_trending_styles (optional)
         "error": None,               # set if the interaction ended early
     }
 
@@ -63,34 +65,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         first — if it is not None, the interaction ended early and the other
         output fields (outfit_suggestion, fit_card) will be None.
 
-    TODO — implement this function using the planning loop you designed in planning.md:
-
-        Step 1: Initialize the session with _new_session().
-
-        Step 2: Parse the user's query to extract a description, size, and
-                max_price. You can use regex, string splitting, or ask the LLM
-                to parse it — document your choice in planning.md.
-                Store the result in session["parsed"].
-
-        Step 3: Call search_listings() with the parsed parameters.
-                Store results in session["search_results"].
-                If no results: set session["error"] to a helpful message and
-                return the session early. Do NOT proceed to suggest_outfit
-                with empty input.
-
-        Step 4: Select the item to use (e.g., the top result).
-                Store it in session["selected_item"].
-
-        Step 5: Call suggest_outfit() with the selected item and wardrobe.
-                Store the result in session["outfit_suggestion"].
-
-        Step 6: Call create_fit_card() with the outfit suggestion and selected item.
-                Store the result in session["fit_card"].
-
-        Step 7: Return the session.
-
-    Before writing code, complete the Planning Loop and State Management sections
-    of planning.md — your implementation should match what you described there.
+    Planning loop with stretch features:
+    - Price comparison on selected item
+    - Trend awareness when search returns no results
+    - Retry logic with loosened constraints on zero results
     """
     import re
 
@@ -127,15 +105,77 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         max_price=parsed["max_price"],
     )
 
-    # Branch A: No results — return early with error
+    # Branch A: No results — try retry logic with loosened constraints
     if not session["search_results"]:
-        session["error"] = (
-            f"No items matching '{parsed['description']}' "
-            f"{f'in size {parsed["size"]} ' if parsed['size'] else ''}"
-            f"{'under $' + str(parsed['max_price']) if parsed['max_price'] else ''} found. "
-            "Try a higher budget, different size, or broader style keywords."
-        )
-        return session
+        # Retry 1: Loosen price constraint (increase by 20)
+        if parsed["max_price"] is not None:
+            loosened_price = parsed["max_price"] * 1.2
+            session["search_results"] = search_listings(
+                description=parsed["description"],
+                size=parsed["size"],
+                max_price=loosened_price,
+            )
+
+        # Retry 2: Loosen size constraint (if specified)
+        if not session["search_results"] and parsed["size"] is not None:
+            session["search_results"] = search_listings(
+                description=parsed["description"],
+                size=None,  # Remove size filter
+                max_price=parsed["max_price"],
+            )
+
+        # Retry 3: Use broader keywords (just first keyword)
+        if not session["search_results"]:
+            keywords = parsed["description"].split()
+            if keywords:
+                broader_description = keywords[0]
+                session["search_results"] = search_listings(
+                    description=broader_description,
+                    size=parsed["size"],
+                    max_price=parsed["max_price"],
+                )
+
+        # Still no results: show trending styles and error
+        if not session["search_results"]:
+            # Get trending styles as alternative recommendation
+            trends = get_trending_styles(
+                size=parsed["size"],
+                category=None
+            )
+
+            # Store trends if successful (not an error message string)
+            if isinstance(trends, list):
+                session["trending_styles"] = trends
+
+            session["error"] = (
+                f"No items matching '{parsed['description']}' "
+                f"{f'in size {parsed["size"]} ' if parsed['size'] else ''}"
+                f"{'under $' + str(parsed['max_price']) if parsed['max_price'] else ''} found. "
+                "Try a higher budget, different size, or broader style keywords. "
+                "Check trending styles below for popular alternatives!"
+            )
+            return session
+        else:
+            # Retry succeeded: notify user which constraints were loosened
+            # Also get trending styles to show alternatives
+            trends = get_trending_styles(
+                size=parsed["size"],
+                category=None
+            )
+            if isinstance(trends, list):
+                session["trending_styles"] = trends
+
+            constraints_loosened = []
+            if parsed["max_price"] is not None:
+                constraints_loosened.append(f"increased budget to ${loosened_price:.0f}")
+            if parsed["size"] is not None:
+                constraints_loosened.append("relaxed size constraint")
+
+            if constraints_loosened:
+                session["error"] = (
+                    f"No exact matches found. Showing results with {', '.join(constraints_loosened)}. "
+                    "Feel free to adjust and search again!"
+                )
 
     # Step 4: Select the top result
     session["selected_item"] = session["search_results"][0]
@@ -160,6 +200,11 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         outfit=session["outfit_suggestion"],
         new_item=session["selected_item"],
     )
+
+    # STRETCH FEATURE: Call compare_price on selected item (optional tool)
+    price_analysis = compare_price(session["selected_item"])
+    if price_analysis.get("rating"):  # Only store if we have enough comparables
+        session["price_analysis"] = price_analysis
 
     # Step 8: Return the complete session
     return session

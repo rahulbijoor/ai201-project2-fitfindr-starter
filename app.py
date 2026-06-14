@@ -58,7 +58,18 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     # Step 4: If error occurred, return error in first panel
     if session["error"]:
-        return session["error"], "", ""
+        error_message = session["error"]
+        # If we have trending styles, append them to the error message
+        if session.get("trending_styles"):
+            # Check if it's actually a list (not an error string)
+            if isinstance(session["trending_styles"], list) and len(session["trending_styles"]) > 0:
+                error_message += "\n\nTRENDING STYLES RIGHT NOW:\n"
+                for i, trend in enumerate(session["trending_styles"][:5], 1):
+                    style_tag = trend.get('style_tag', 'unknown')
+                    score = trend.get('popularity_score', 0)
+                    count = trend.get('example_count', 0)
+                    error_message += f"{i}. {style_tag} ({score:.0f}% popular, {count} items)\n"
+        return error_message, "", ""
 
     # Step 5: Format selected_item and return all results
     selected_item = session["selected_item"]
@@ -73,6 +84,11 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Style: {', '.join(selected_item['style_tags'])}\n"
         f"Description: {selected_item['description']}"
     )
+
+    # Add price analysis if available
+    if session.get("price_analysis"):
+        price_info = session["price_analysis"]
+        listing_text += f"\n\nPRICE ANALYSIS:\n{price_info['explanation']}\nRating: {price_info['rating'].upper()}"
 
     return (
         listing_text,
